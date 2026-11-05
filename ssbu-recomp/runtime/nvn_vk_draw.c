@@ -3705,6 +3705,12 @@ swap: ;
     present_flush();
     tp[2] = tk();                               /* session 14: a present still kept for its tick goes out before the next one is made */
     if (g_pend.recreate) { g_pend.recreate = 0; cmd_wait_all(); swapchain_destroy(); InterlockedIncrement64(&g_vk_recreated); }
+#ifndef _WIN32
+    /* Wayland may stretch the old surface without returning OUT_OF_DATE. */
+    if (display_take_pixel_resize() && V.swapchain) {
+        cmd_wait_all(); swapchain_destroy(); InterlockedIncrement64(&g_vk_recreated);
+    }
+#endif
     /* an extra present of a held loading screen: everything submitted so far is waited for first, so that the semaphore pair
      * taken below has no pending operation (validation run s11v2: VUID-vkAcquireNextImageKHR-semaphore-01779, three times,
      * all at such presents: with one submission a present the pair came round before its command buffer had been waited for) */

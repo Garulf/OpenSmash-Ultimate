@@ -459,7 +459,8 @@ static int tzrule_for_location(TzRule *out, const char *iana) {            /* Li
     location_name(mine);
     if (!strcmp(mine, iana)) { memcpy(out, my_rule(), sizeof *out); return 0; }
     if (!iana[0] || strstr(iana, "..") || iana[0] == '/') return -1;
-    snprintf(path, sizeof path, "/usr/share/zoneinfo/%s", iana);
+    const char *tzdir = getenv("SSBU_TZDIR");
+    snprintf(path, sizeof path, "%s/%s", tzdir && tzdir[0] ? tzdir : "/usr/share/zoneinfo", iana);
     FILE *f = fopen(path, "rb");
     char magic[4] = {0};
     if (!f) return -1;

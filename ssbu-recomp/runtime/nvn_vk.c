@@ -467,6 +467,12 @@ static void wait_last_submit(void) {
 static void present_colour(const float rgba[4]) {
     if (!V.alive) return;
     wait_last_submit();
+#ifndef _WIN32
+    if (display_take_pixel_resize() && V.swapchain) {
+        swapchain_destroy();
+        InterlockedIncrement64(&g_vk_recreated);
+    }
+#endif
     if (!V.swapchain && !swapchain_create()) { InterlockedIncrement64(&g_vk_skipped); return; }
     uint32_t index = 0;
     VkResult r = vkAcquireNextImageKHR(V.device, V.swapchain, 1000000000ull, V.acquired, NULL, &index);

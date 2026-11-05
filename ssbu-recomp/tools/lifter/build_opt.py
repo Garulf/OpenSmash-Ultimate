@@ -512,6 +512,12 @@ def cmd_nro(jobs, names):
 
 if __name__ == '__main__':
     cmd = sys.argv[1]
+    if cmd == 'nro' and POSIX_TARGET:
+        # Permit an independent module prebuild while main compiles, and make
+        # the normal setup pipeline wait before reusing the same module outputs.
+        import fcntl
+        _nro_build_lock = open(os.path.join(HERE, '.nro-build.lock'), 'a')
+        fcntl.flock(_nro_build_lock, fcntl.LOCK_EX)
     if cmd == 'main':
         sys.exit(cmd_main(int(sys.argv[2]) if len(sys.argv) > 2 else 28))
     if cmd == 'nro':

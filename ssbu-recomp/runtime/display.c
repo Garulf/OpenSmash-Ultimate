@@ -482,8 +482,13 @@ int oe_exit_request(void);                            /* nnmisc.c */
 static char g_title[96];
 static volatile LONG g_mon_dirty = 1;                 /* a monitor was connected or removed: the window thread reads the list again */
 static volatile LONG g_mon_moved;                     /* the monitor the window went to (an SDL_DisplayID; 0 = none since the last look) */
+static volatile LONG g_pixel_resize;
+static SDL_WindowID g_display_window_id;
+int display_take_pixel_resize(void) { return (int)InterlockedExchange(&g_pixel_resize, 0); }
 static bool SDLCALL close_watch(void *user, SDL_Event *e) {
     (void)user;
+    if (e->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && e->window.windowID == g_display_window_id)
+        InterlockedExchange(&g_pixel_resize, 1);
     if (e->type == SDL_EVENT_DISPLAY_ADDED || e->type == SDL_EVENT_DISPLAY_REMOVED) InterlockedExchange(&g_mon_dirty, 1);
     if (e->type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) InterlockedExchange(&g_mon_moved, (LONG)e->window.data1);
     if (e->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED || e->type == SDL_EVENT_QUIT) {
@@ -652,6 +657,7 @@ static void window_open(void) {
         SDL_DestroyProperties(pr);
     }
     if (!w) { printf("display: SDL_CreateWindow failed: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
+    g_display_window_id = SDL_GetWindowID(w);
     SDL_AddEventWatch(close_watch, NULL);
     g_win_w = go->width; g_win_h = go->height; g_mode_now = go->window_mode;
     menu_sdl_attach(w);

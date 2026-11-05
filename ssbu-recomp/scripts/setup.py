@@ -627,9 +627,8 @@ def deps_linux(cx):
         if r.returncode:
             raise Fail('development files of %s (%s) not found by pkg-config%s' % (name, pc, LINUX_HINT))
         say('  %-13s %s' % (pc, r.stdout.strip()))
-    for h, name in (('/usr/include/glslang/Include/glslang_c_interface.h', 'glslang'), ('/usr/include/GL/gl.h', 'OpenGL (libGL)')):
-        if not os.path.exists(h):
-            raise Fail('%s headers not found (%s)%s' % (name, h, LINUX_HINT))
+    # The compile probe below checks these headers through the compiler's actual
+    # include paths, including Nix development shells without /usr/include.
     # one program linked against every library of the build, and run: a missing library shows here, not after an hour
     probe = os.path.join(cx.build, 'probe')
     os.makedirs(probe, exist_ok=True)

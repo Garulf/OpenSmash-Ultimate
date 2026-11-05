@@ -365,6 +365,9 @@ int has_name(const VkExtensionProperties *e, uint32_t n, const char *name);
 extern int g_mu_shot_src;                               /* U1: the swapchain images can be read back (SSBU_MENU_TEST only) */
 void swapchain_destroy(void);
 int swapchain_create(void);
+#ifndef _WIN32
+int display_take_pixel_resize(void);
+#endif
 void *vk_sym(const char *name);
 int nvn_vk_init(void *hwnd);
 void nvn_vk_report(FILE *out);
