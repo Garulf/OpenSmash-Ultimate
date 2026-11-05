@@ -29,7 +29,13 @@ except ImportError:                                                             
     import zstandard
 
     def zstd_decompress(data):
-        return zstandard.ZstdDecompressor().decompressobj().decompress(data)
+        # (a frame cut short decompresses to what it has, often nothing, without an error: refused, as
+        # compression.zstd.decompress refuses it)
+        d = zstandard.ZstdDecompressor().decompressobj()
+        out = d.decompress(data)
+        if not d.eof:
+            raise zstandard.ZstdError("compressed data ended before the end of its frame")
+        return out
 
     class ZstdDecompressor:   # (only what ncz_to_nca uses: decompress() of the stream piece by piece)
         def __init__(self):

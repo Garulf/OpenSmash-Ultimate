@@ -47,7 +47,13 @@ except ImportError:                                               # 3.10 to 3.13
     import zstandard
 
     def zstd_decompress(data):
-        return zstandard.ZstdDecompressor().decompressobj().decompress(data)
+        # (a frame cut short decompresses to what it has, often nothing, without an error: refused, as
+        # compression.zstd.decompress refuses it)
+        d = zstandard.ZstdDecompressor().decompressobj()
+        out = d.decompress(data)
+        if not d.eof:
+            raise zstandard.ZstdError("compressed data ended before the end of its frame")
+        return out
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import arc as A    # noqa: E402
