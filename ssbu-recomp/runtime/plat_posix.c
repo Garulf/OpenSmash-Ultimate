@@ -1826,6 +1826,91 @@ static void *sys_dlopen(const char *name) {        /* a system library by its pl
 #endif
     return h;
 }
+
+#ifdef __linux__
+/* SSBU_CODE_PREFETCH=1: our own libraries' files are read into the page cache by a background thread, the game's as
+ * the program starts and each module's as nn::ro loads it. Otherwise code first run in a match (a fighter's entrance)
+ * waits for the disk where it faults in, several milliseconds at a time on the game thread. */
+enum { PREFETCH_QUEUE = 256 };
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t more;
+    pthread_once_t started;
+    char *path[PREFETCH_QUEUE];
+    unsigned head, tail;
+} g_prefetch = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_ONCE_INIT, {0}, 0, 0};
+
+static int prefetch_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SSBU_CODE_PREFETCH"); on = e && atoi(e) != 0; }
+    return on;
+}
+/* Read, not POSIX_FADV_WILLNEED: Linux reads no more than the device's readahead window (128 KB on NVMe) for that. */
+static void prefetch_read(const char *path, char *buf, size_t size) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+    for (;;) {
+        ssize_t k = read(fd, buf, size);
+        if (k <= 0 && !(k < 0 && errno == EINTR)) break;
+    }
+    close(fd);
+}
+static void *prefetch_worker(void *arg) {
+    (void)arg;
+    enum { CHUNK = 1 << 20 };
+    char *buf = malloc(CHUNK);
+    if (!buf) return NULL;
+    setpriority(PRIO_PROCESS, (id_t)os_tid(), 10);           /* behind every game thread */
+    for (;;) {
+        pthread_mutex_lock(&g_prefetch.lock);
+        while (g_prefetch.head == g_prefetch.tail) pthread_cond_wait(&g_prefetch.more, &g_prefetch.lock);
+        char *path = g_prefetch.path[g_prefetch.head++ % PREFETCH_QUEUE];
+        pthread_mutex_unlock(&g_prefetch.lock);
+        prefetch_read(path, buf, CHUNK);
+        free(path);
+    }
+    return NULL;
+}
+static void prefetch_start(void) {
+    sigset_t all, old;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &old);                /* the process's signals stay with the game's threads */
+    pthread_t th;
+    int e = pthread_create(&th, NULL, prefetch_worker, NULL);
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    if (e) return;
+    pthread_setname_np(th, "code prefetch");
+    pthread_detach(th);
+}
+static void prefetch_file(const char *path) {
+    if (!prefetch_on()) return;
+    pthread_once(&g_prefetch.started, prefetch_start);
+    char *copy = strdup(path);
+    if (!copy) return;
+    pthread_mutex_lock(&g_prefetch.lock);
+    if (g_prefetch.tail - g_prefetch.head < PREFETCH_QUEUE) { g_prefetch.path[g_prefetch.tail++ % PREFETCH_QUEUE] = copy; copy = NULL; }
+    pthread_cond_signal(&g_prefetch.more);
+    pthread_mutex_unlock(&g_prefetch.lock);
+    free(copy);
+}
+static int prefetch_if_ours(struct dl_phdr_info *info, size_t size, void *count) {
+    (void)size;
+    const char *dir = exe_dir();
+    size_t n = strlen(dir);
+    if (!strncmp(info->dlpi_name, dir, n) && info->dlpi_name[n] == '/') { prefetch_file(info->dlpi_name); ++*(int *)count; }
+    return 0;
+}
+__attribute__((constructor)) static void prefetch_game(void) {          /* the game library, linked to the exe */
+    if (!prefetch_on()) return;
+    int count = 0;
+    dl_iterate_phdr(prefetch_if_ours, &count);
+    fprintf(stderr, "plat: SSBU_CODE_PREFETCH: %d of the program's libraries, then each module as it loads\n", count);   /* (stdout is set up in main) */
+}
+#else
+static void prefetch_file(const char *path) { (void)path; }
+#endif
+
 HMODULE LoadLibraryA(LPCSTR name) {
     static const struct { const char *win, *linux_; } map[] = {
 #ifdef __APPLE__                                  /* Homebrew's libraries; the Vulkan loader finds MoltenVK through its driver file */
@@ -1847,6 +1932,7 @@ HMODULE LoadLibraryA(LPCSTR name) {
     /* Windows looks next to the exe first; dlopen only does that for a path */
     if (b[0] != '/') snprintf(c, sizeof c, "%s/%s", exe_dir(), b); else snprintf(c, sizeof c, "%s", b);
     void *h = dlopen(c, RTLD_NOW | RTLD_LOCAL);
+    if (h) prefetch_file(c);
     if (!h && b[0] != '/') h = dlopen(b, RTLD_NOW | RTLD_LOCAL);
     if (!h) { t_lasterr = ERROR_FILE_NOT_FOUND; if (getenv("SSBU_PLAT_DLERROR")) fprintf(stderr, "plat: dlopen %s: %s\n", c, dlerror()); }
     return h;

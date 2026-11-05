@@ -85,6 +85,22 @@ It is opt-in and does not reduce particles or change simulation speed.
 These options need before/after measurements. Defaults have not been changed
 based on a single favorable frame or an average-FPS figure.
 
+## Read game code ahead
+
+`SSBU_CODE_PREFETCH=1` (Linux) starts a background thread that reads the game
+library into the page cache as the program starts, and each module as
+`nn::ro` loads it. The game library holds 570 MB of lifted code, and every
+fighter has a module of its own. Without the switch, code that first runs
+during a match, such as a fighter's entrance, comes from the disk one page
+fault at a time, on the game's main thread.
+
+The thread runs at nice 10 and blocks the process's signals. It only reads
+files and changes no game state or timing. It costs page cache for the files
+it reads (about 600 MB in a four-player match), which the kernel can reclaim.
+It is off by default. The thread reads the files instead of calling
+`POSIX_FADV_WILLNEED`, because Linux reads no more than the device's
+readahead window for that call (128 KB on the NVMe drive tested).
+
 ## First Albedo measurements (2026-11-05)
 
 NixOS, Ryzen 7 5800XT, RTX 5080 through PRIME/XWayland, 13.0.4, four Mario
@@ -114,6 +130,51 @@ The severe particle-related collapse reported by the player has not been
 fully reproduced or fixed. The measurements and opt-in cache provide a
 starting point; normal-speed high-refresh rendering remains unimplemented.
 Steam Deck hardware, macOS and Windows gameplay were not tested in this pass.
+The next section identifies one cause of entrance stalls: game code that is
+not yet in the page cache.
+
+## Cold game code in entrances (2026-11-05)
+
+Same machine, after a reboot. Four players (Palutena, Rosalina, Bayonetta,
+Pikachu) on Final Destination at scale 2.0, with `SSBU_HITCH=20`. The game
+ran in a 320x180 window on a private Xvfb display, because the desktop's
+XWayland was hung at the time. Internal rendering stays 3840x2160, and a
+four-Mario calibration run matched the earlier XWayland baseline.
+
+Before each run the game library and modules were dropped from the page cache
+(`POSIX_FADV_DONTNEED`), as after a reboot; the game data stayed cached. One
+host binary was used, with the switch off and on in alternation, three runs
+each:
+
+| Per run | Off | On |
+|---|---|---|
+| Entrance frames over 20 ms (of 420) | 24, 21, 29 | 10, 14, 6 |
+| Entrance 99th percentile, ms | 30.0, 31.4, 28.1 | 22.4, 22.4, 20.8 |
+| Frames over 20 ms after the entrance | 19, 21, 25 | 10, 15, 16 |
+| `SSBU_HITCH` frames over 20 ms, entrance on | 43, 41, 53 | 20, 29, 22 |
+| Of those, main thread off a CPU in lifted code | 11, 14, 11 | 1, 2, 2 |
+| Major page faults | 2,414, 2,413, 2,414 | 156, 156, 156 |
+
+All six runs produced the same fight-state hash (4,484 records). With the
+switch off, the main thread waited 5 to 6 ms at a time in page faults. A run
+recorded with perf put most of those faults in the game library and the
+fighter modules, with one burst of 42 ms. After the switch read the files, the whole
+game library and all four fighter modules were cached, against 159 of 570 MB
+and 19 of 26 MB without it.
+
+The switch only matters while the code is not cached: the first matches after
+a boot, or after memory pressure has evicted it. An earlier warm repeat
+without the switch had 9 and 15 frames over 20 ms, close to the runs with it.
+
+Not fixed by it: the first or second frame with fighters takes 38 to 50 ms in
+every run, mostly in present and command submission. The other remaining
+frames over 20 ms are mostly in the frame wait, a pacing effect that the
+four-Mario warm baseline also shows (7 in its entrance).
+
+With the switch on, a run under the Vulkan validation layer completed 2,283
+frames, including the entrance, 300 fight frames and a normal shutdown,
+without validation messages. The platform self-test (`tests/plat_selftest.c`)
+passed with the switch off and on.
 
 ## Source checks on NixOS
 
