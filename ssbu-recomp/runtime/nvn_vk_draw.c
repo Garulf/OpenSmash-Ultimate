@@ -24,6 +24,13 @@ static int have_targets_live(void);
 VKD(X)
 #undef X
 static PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT;
+static struct {
+    VkVertexInputBindingDescription2EXT bindings[17];
+    VkVertexInputAttributeDescription2EXT attributes[16];
+    uint32_t nb, na;
+    int enabled;
+    LONG64 recorded, reused;
+} g_vi_cache;
 static PFN_vkCmdBindVertexBuffers2 vkCmdBindVertexBuffers2;  /* MAC2 / V_novids: the strides of the bindings without dynamic vertex input */
 static PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR;
 static PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2;
@@ -252,7 +259,13 @@ static LONG64 g_ts_n;
  * was a battle frame (compute dispatches and more than 120 draws): median / p99 of the battle frames at exit ("nvn_vk_gpu_fight:"). */
 #define FRSTAT_N 40000
 static float g_fr_gpu[FRSTAT_N], g_fr_wall[FRSTAT_N];
+static uint8_t g_fr_gpu_valid[FRSTAT_N];
 static uint8_t g_fr_fight[FRSTAT_N];
+/* Optional diagnostics include entrance frames, which the aggregate fight
+ * report deliberately excludes. Written at shutdown, never in the frame loop. */
+static struct FrameCsv { float replay, wait_gpu, pipeline; int draws, skipped; } *g_fr_csv;
+static const char *g_fr_csv_path;
+static LONG64 g_fr_csv_last[3];
 static LONG64 g_cur_frame; LONG64 g_battle_frames;
 /* Round 16 (P3 section 15), all test / switch code:
  * SSBU_VK_PASSTIME=1 (with SSBU_VK_GPUTIME=1): a timestamp at the start of every pass (and of every run of compute
@@ -289,7 +302,7 @@ static void slot_wait(Slot *s) {
     VKC(vkResetFences(V.device, 1, &s->fence));
     if (g_ts_on > 0) {                             /* SSBU_VK_GPUTIME=1: the GPU's own clock at the first and the last command of this buffer */
         uint64_t ts[2] = {0, 0};
-        if (vkGetQueryPoolResults(V.device, g_ts_pool, (uint32_t)(s - R.slot) * 2, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] >= ts[0]) { double ns = (double)(ts[1] - ts[0]) * (double)V.props.limits.timestampPeriod; g_ts_ns += ns; g_ts_n++; if (s->ts_frame >= 0 && s->ts_frame < FRSTAT_N) g_fr_gpu[s->ts_frame] += (float)(ns / 1e6); }
+        if (vkGetQueryPoolResults(V.device, g_ts_pool, (uint32_t)(s - R.slot) * 2, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] >= ts[0]) { double ns = (double)(ts[1] - ts[0]) * (double)V.props.limits.timestampPeriod; g_ts_ns += ns; g_ts_n++; if (s->ts_frame >= 0 && s->ts_frame < FRSTAT_N) { g_fr_gpu[s->ts_frame] += (float)(ns / 1e6); g_fr_gpu_valid[s->ts_frame] = 1; } }
         int si = (int)(s - R.slot);
         if (g_pt_on > 0 && g_pt_slot[si].n) {      /* SSBU_VK_PASSTIME: the segments of this command buffer */
             static uint64_t pt[PT_MAX];
@@ -322,7 +335,7 @@ static void cmd_begin(void) {
     VKC(vkBeginCommandBuffer(s->cmd, &bi));
     R.cmd = s->cmd; R.recording = 1; R.in_pass = 0; R.pipe_bound = NULL; R.dyn_dirty = R.vi_dirty = 1;
     if (g_ts_on < 0) {
-        g_ts_on = getenv("SSBU_VK_GPUTIME") && atoi(getenv("SSBU_VK_GPUTIME")) && V.props.limits.timestampComputeAndGraphics;
+        g_ts_on = ((getenv("SSBU_VK_GPUTIME") && atoi(getenv("SSBU_VK_GPUTIME"))) || g_fr_csv != NULL) && V.props.limits.timestampComputeAndGraphics;
         if (g_ts_on) { VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO}; qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = NSLOT * 2; VKC(vkCreateQueryPool(V.device, &qi, NULL, &g_ts_pool)); }
     }
     s->ts_frame = g_cur_frame;
@@ -2587,7 +2600,7 @@ static int draw_prepare(unsigned prim) {
     pkey_targets(&k);
     Pipe *p = pipe_get(&k, vs, fs);
     if (!p) return 0;                              /* shader_wait = skip: the pipeline is being made by a worker, the draw is left out (counted in pipe_get) */
-    if (!R.pipe_bound) R.dyn3_dirty = 1;          /* a new command buffer, or a pipeline of our own with static state was bound */
+    if (!R.pipe_bound) { R.dyn3_dirty = 1; R.vi_dirty = 1; } /* a new command buffer, or our own static-state pipeline */
     if (R.pipe_bound != p) { vkCmdBindPipeline(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->p); R.pipe_bound = p; }
     if (R.dyn_dirty) { set_dynamic_state(); R.dyn_dirty = 0; }
     if (D.has_eds3 && (R.dyn3_dirty || R.dyn3_samples != k.samples)) { set_dynamic_state3(k.samples); R.dyn3_dirty = 0; }
@@ -2638,7 +2651,22 @@ static int draw_prepare(unsigned prim) {
             for (uint32_t i = 0; i < nb; i++) vst[i] = bd[i].stride;
             if (nb) vkCmdBindVertexBuffers2(R.cmd, 0, nb, vb, vo, NULL, vst);
         } else {
-        vkCmdSetVertexInputEXT(R.cmd, nb, bd, na, ad);
+        /* Vulkan dynamic vertex-input state persists until changed, including
+         * across draws and binds of our dynamic-input pipelines. Compare the
+         * complete descriptions, not just the guest's attribute numbers:
+         * shader integer inputs and missing vertex streams also affect them.
+         * Buffers and offsets are still bound for every draw below. */
+        if (!g_vi_cache.enabled || R.vi_dirty || nb != g_vi_cache.nb || na != g_vi_cache.na ||
+            memcmp(bd, g_vi_cache.bindings, nb * sizeof bd[0]) ||
+            memcmp(ad, g_vi_cache.attributes, na * sizeof ad[0])) {
+            vkCmdSetVertexInputEXT(R.cmd, nb, bd, na, ad);
+            if (g_vi_cache.enabled) {
+                memcpy(g_vi_cache.bindings, bd, nb * sizeof bd[0]);
+                memcpy(g_vi_cache.attributes, ad, na * sizeof ad[0]);
+                g_vi_cache.nb = nb; g_vi_cache.na = na; R.vi_dirty = 0;
+            }
+            if (g_vi_cache.enabled) g_vi_cache.recorded++;
+        } else g_vi_cache.reused++;
         if (nb) vkCmdBindVertexBuffers(R.cmd, 0, nb, vb, vo);
         }
     }
@@ -3829,6 +3857,14 @@ swap: ;
             LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
             g_fr_fight[frame] = (uint8_t)battle;
             g_fr_wall[frame] = t_prev ? (float)((double)(t_now - t_prev) * 1000.0 / (double)fq.QuadPart) : 0.0f;
+            if (g_fr_csv) {
+                double k = 1000.0 / (double)fq.QuadPart;
+                g_fr_csv[frame] = (struct FrameCsv){
+                    (float)((g_tm[3] - g_fr_csv_last[0]) * k),
+                    (float)((g_tm[0] - g_fr_csv_last[1]) * k),
+                    (float)((g_tm[5] - g_fr_csv_last[2]) * k), R.frame_draws, R.frame_skipped};
+                g_fr_csv_last[0] = g_tm[3]; g_fr_csv_last[1] = g_tm[0]; g_fr_csv_last[2] = g_tm[5];
+            }
             if (battle && g_battle_frames > 30) {  /* round 16: first draws of a pipeline in this frame against the frame's time */
                 static int fl = -1;
                 double wall = (double)g_fr_wall[frame], k = 1000.0 / (double)fq.QuadPart;
@@ -4071,6 +4107,12 @@ static void pcache_save(void) {
 }
 #endif
 void vkd_init(void) {
+    g_vi_cache.enabled = getenv("SSBU_VK_VICACHE") && atoi(getenv("SSBU_VK_VICACHE"));
+    g_fr_csv_path = getenv("SSBU_VK_FRAMECSV");
+    if (g_fr_csv_path && g_fr_csv_path[0]) {
+        g_fr_csv = calloc(FRSTAT_N, sizeof *g_fr_csv);
+        if (!g_fr_csv) printf("nvn_vk: no memory for frame CSV capture\n");
+    }
 #define X(n) n = (PFN_##n)vkGetDeviceProcAddr(V.device, #n); if (!n) vkd_fail("the device has no " #n);
     VKD(X)
 #undef X
@@ -4145,6 +4187,24 @@ void vkd_init(void) {
     fflush(stdout);
 }
 static int frstat_cmp(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return x < y ? -1 : x > y; }
+static void frstat_csv(void) {
+    if (!g_fr_csv) return;
+    FILE *out = fopen(g_fr_csv_path, "w");
+    if (!out) { printf("nvn_vk: cannot write frame CSV: %s\n", g_fr_csv_path); return; }
+    fprintf(out, "frame,fighters,wall_ms,gpu_ms,replay_ms,gpu_wait_ms,pipeline_ms,draws,skipped\n");
+    for (LONG64 f = 0; f < g_cur_frame && f < FRSTAT_N; f++) {
+        struct FrameCsv *r = &g_fr_csv[f];
+        fprintf(out, "%lld,%d,%.4f,", (long long)f, (int)g_fr_fight[f], (double)g_fr_wall[f]);
+        if (g_fr_gpu_valid[f]) fprintf(out, "%.4f", (double)g_fr_gpu[f]);
+        fprintf(out, ",%.4f,%.4f,%.4f,%d,%d\n", (double)r->replay, (double)r->wait_gpu,
+                (double)r->pipeline, r->draws, r->skipped);
+    }
+    int failed = ferror(out);
+    if (fclose(out)) failed = 1;
+    if (failed) printf("nvn_vk: error writing frame CSV: %s\n", g_fr_csv_path);
+    else printf("nvn_vk: frame CSV written (at most %d frames): %s\n", FRSTAT_N, g_fr_csv_path);
+    free(g_fr_csv); g_fr_csv = NULL;
+}
 /* Session 9: battle frames only (dispatches and more than 120 draws: the fight and the result screen's fighters); the first 30 are left out (their buffers were recorded
  * while the stage was still being set up). GPU ms = sum of the spans of the frame's command buffers (SSBU_VK_GPUTIME=1). */
 static void frstat_report(void) {
@@ -4181,12 +4241,16 @@ static void frstat_report(void) {
 void vkd_shutdown(void) {
     wd_stop();
     if (!R.ring) return;
+    if (g_fr_csv) cmd_wait_all();     /* collect the final buffers' timestamp queries */
+    if (g_vi_cache.enabled) printf("nvn_vk: vertex-input cache: %lld states recorded, %lld redundant states avoided\n",
+                                  (long long)g_vi_cache.recorded, (long long)g_vi_cache.reused);
     {   LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
         double k = 1000.0 / (double)fq.QuadPart;
         printf("nvn_vk_tex: textures made ahead of their first use: %lld (%.0f MB, %.0f ms in all, at most %.1f ms after one present); made or read at their use: %lld times, %.0f ms (of them in fight frames: %lld, %.0f ms)\n",
                (long long)g_ta_n, (double)g_ta_bytes / 1048576.0, (double)g_ta_tk * k, (double)g_ta_max_tk * k, (long long)g_late_n, (double)g_late_tk * k, (long long)g_late_fight_n, (double)g_late_fight_tk * k);
     }
     frstat_report();
+    frstat_csv();
     if (RS_ON && rs_ui_native()) printf("nvn_vk_scale: SSBU_VK_UI_NATIVE=1: the window's textures are kept at the game's size; passes with such a colour target and a SCALED depth target (drawn without depth): %lld\n", (long long)g_rs_mixed);
     if (RS_ON) printf("nvn_vk_scale: resolution scale %.3f: %lld images made scaled, %lld fragment stages translated in this run for it (%lld of them read the pixel position, %lld fetch texels by integer position), %lld uploads into and %lld read-backs from a scaled image, %lld copies / blits touching one\n",
                       (double)rs_scale(), (long long)g_rs_images, (long long)g_rs_stages, (long long)g_rs_fcs, (long long)g_rs_tf, (long long)g_rs_up, (long long)g_rs_down, (long long)g_rs_blits);
@@ -4204,7 +4268,13 @@ void vkd_shutdown(void) {
     for (int i = 0; i < 16; i++) if (g_sem_img[i]) { vkDestroySemaphore(V.device, g_sem_img[i], NULL); g_sem_img[i] = NULL; }
     fl_shutdown();
     if (g_ovl.made) { vkDestroyImage(V.device, g_ovl.img, NULL); g_ovl.made = 0; }      /* the progress bar's image; its memory goes with the blocks */
-    for (int i = 0; i < 256; i++) if (g_cb[i].buf) { vkDestroyBuffer(V.device, g_cb[i].buf, NULL); g_cb[i].buf = NULL; g_cb[i].state = 0; }
+    for (int i = 0; i < 256; i++) {
+        /* Read-back staging buffers have their own VkBuffer handles even
+         * though their memory comes from the blocks released below. */
+        if (g_cb[i].stg) { vkDestroyBuffer(V.device, g_cb[i].stg, NULL); g_cb[i].stg = NULL; }
+        if (g_cb[i].buf) { vkDestroyBuffer(V.device, g_cb[i].buf, NULL); g_cb[i].buf = NULL; }
+        g_cb[i].state = 0;
+    }
     g_cb_live = g_cb_pending = g_ncdisp = 0;
     for (int i = 0; i < 4096; i++) for (VStage *v = g_vstage[i], *n; v; v = n) {
         n = v->next;

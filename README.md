@@ -1,5 +1,11 @@
 # OpenSmash-Ultimate
 
+> **Garulf's Linux performance fork:** experiments target the staged
+> [`ssbu-recomp/` runtime](ssbu-recomp/docs/PERFORMANCE_FORK.md), including
+> particle-heavy match entrances. The original installation guide below is
+> upstream's Windows guide. Normal-speed rendering above 60 FPS is not yet
+> implemented in this fork. Private game files are supplied locally.
+
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/pkgyYGf3YB)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 

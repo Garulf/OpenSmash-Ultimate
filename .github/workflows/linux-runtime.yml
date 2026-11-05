@@ -46,6 +46,11 @@ jobs:
       - name: Compile the host runtime (and a stand-in module .so)
         run: python scripts/macos/host_check.py --target linux --clang clang-19 --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu --imgui deps/imgui
 
+      - name: Host build cache and entrance-frame report regressions
+        run: |
+          python tests/host_build_flags_test.py
+          python tests/frame_report_test.py
+
       - name: Differential test of the lifted code on this host (no game data; -O0 and -O1)
         run: |
           python scripts/macos/difftest_synthetic.py --work build-linux/work --clang clang-19 --opt=-O0

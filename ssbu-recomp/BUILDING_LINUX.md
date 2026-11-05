@@ -1,5 +1,8 @@
 # Building and running on Linux
 
+Fork-specific profiling, match-entrance measurements and frame-rate limits:
+[Linux performance experiments](docs/PERFORMANCE_FORK.md).
+
 A native Linux build: the game becomes an ELF executable and shared libraries, with SDL3 for the window, sound and
 controllers, Vulkan for graphics and FFmpeg for the movies. No Wine and no emulator. As on Windows, the repository holds
 no game code: everything is generated on your PC from **your own dump** of Super Smash Bros. Ultimate **13.0.4 or 13.0.5**
