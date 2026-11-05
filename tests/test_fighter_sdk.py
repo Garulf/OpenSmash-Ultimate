@@ -223,6 +223,19 @@ def find_clang():
     return None
 
 
+def compiler_proper(clang):
+    """The clang a clang command runs: itself, or for a wrapper script (Nix's cc-wrapper) the one it wraps.
+    Such a wrapper adds its Linux host's options (-isystem, hardening) to every command, which a clang-cl
+    command for Windows does not take; clang --version names the folder of the one that ran (InstalledDir)."""
+    try:
+        out = subprocess.run([clang, '--version'], capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return clang
+    folder = next((line.split(':', 1)[1].strip() for line in out.splitlines() if line.startswith('InstalledDir:')), '')
+    proper = os.path.join(folder, os.path.basename(clang)) if folder else ''
+    return proper if os.path.isfile(proper) else clang
+
+
 @unittest.skipUnless(find_clang(), 'no clang on the PATH')
 class DriverTests(unittest.TestCase):
     """What clang makes of the Windows and Linux lines (-###: the options reach the compiler proper; nothing is
@@ -237,7 +250,8 @@ class DriverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='fighter-sdk-test-') as tmp:
             src = write(os.path.join(tmp, 'a.cpp'), 'float f(float a, float b, float c) { return a * b + c; }\n')
             cmd = tc.compile_command(src, os.path.join(tmp, 'a' + tc.obj), [tmp])
-            r = subprocess.run([find_clang(), *driver, '-###', *cmd[1:]], capture_output=True, text=True, timeout=60)
+            clang = compiler_proper(find_clang()) if target == 'windows' else find_clang()
+            r = subprocess.run([clang, *driver, '-###', *cmd[1:]], capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         lines = [l for l in r.stderr.splitlines() if '"-cc1"' in l]
         self.assertEqual(len(lines), 1, r.stderr[-2000:])

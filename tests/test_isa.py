@@ -247,6 +247,19 @@ def which_clang():
     return found if found and os.path.exists(found) else None
 
 
+def compiler_proper(clang):
+    """The clang a clang command runs: itself, or for a wrapper script (Nix's cc-wrapper) the one it wraps.
+    Such a wrapper adds its Linux host's options (-isystem, hardening) to every command, which a clang-cl
+    command for Windows does not take; clang --version names the folder of the one that ran (InstalledDir)."""
+    try:
+        out = subprocess.run([clang, '--version'], capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return clang
+    folder = next((line.split(':', 1)[1].strip() for line in out.splitlines() if line.startswith('InstalledDir:')), '')
+    proper = os.path.join(folder, os.path.basename(clang)) if folder else ''
+    return proper if os.path.isfile(proper) else clang
+
+
 CLANG = which_clang()
 HAVE_CLANG_CL = os.name == 'nt' and (os.path.exists(cc.CLANG) or shutil.which(cc.CLANG) is not None)
 
@@ -312,7 +325,7 @@ class FlagTests(unittest.TestCase):
             drivers = {}
             if CLANG:
                 drivers['clang'] = lambda flags: [CLANG, '--target=x86_64-linux-gnu', *flags, '-dM', '-E', '-x', 'c', 'empty.c']
-            cl = [cc.CLANG] if HAVE_CLANG_CL else [CLANG, '--driver-mode=cl', '--target=x86_64-pc-windows-msvc']
+            cl = [cc.CLANG] if HAVE_CLANG_CL else [compiler_proper(CLANG), '--driver-mode=cl', '--target=x86_64-pc-windows-msvc']
             drivers['clang-cl'] = lambda flags: [*cl, '/nologo', *flags, '/clang:-dM', '/E', 'empty.c']
             for driver, command in drivers.items():
                 table = isa.CLANG if driver == 'clang' else isa.CLANG_CL
