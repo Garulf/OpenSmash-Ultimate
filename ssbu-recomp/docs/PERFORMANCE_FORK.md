@@ -17,6 +17,47 @@ Normal-speed rendering above 60 FPS needs a separate rendering clock and
 interpolation, or a validated variable-timestep implementation. Neither is
 implemented here. Increasing the refresh-event frequency alone is not a fix.
 
+The game counts the refreshes signalled by `display.c` as its time and draws
+one picture per game step. No render pass exists that could draw a moment
+between two steps. The possible routes, and why none was built in this pass:
+
+- Frame generation after the game: a picture synthesized between two
+  finished frames. The game gives no motion vectors, so this needs optical
+  flow on the GPU. Each real frame waits for the next one, adding about one
+  game frame (16.7 ms) of input latency, which matters in a fighting game.
+  Particles, UI and text show the usual artifacts. External Vulkan layers
+  already do this for any game; test against one before building it in.
+  Building it in would also need a present path where the extra pictures do
+  not count as refreshes for the game clock, plus a measured latency budget.
+- Interpolating the game's own draws: replay frame N's commands with their
+  constants blended toward frame N+1. This needs a match between the draws
+  of two frames (the draw count changes from about 470 to 608 within one
+  entrance) and knowledge of which constant bytes are matrices. Skinning,
+  particles and UI would also have to stay consistent. Not attempted.
+- A variable timestep in the game: the lifted code is the game's own fixed
+  60 Hz logic. Changing it changes gameplay and the determinism that replays
+  and rollback depend on.
+
+### Even pacing on high-refresh monitors
+
+A smaller problem is solvable: showing 60 FPS evenly. A 144 Hz panel cannot
+show every 60 FPS frame for the same time; frames alternate between two and
+three refreshes. The Windows build measures vblanks and, on a panel at k x 60
+Hz (120, 240), locks its clock to every k-th vblank, so each frame stays on
+screen for exactly k refreshes. The Linux build has no vblank source
+(`vblank_thread` in `display.c`), so it always paces with its own 60.000 Hz
+clock. That clock drifts against a 120 Hz panel too.
+
+Two ways to fix this, neither implemented here:
+
+- Variable refresh in the compositor (VRR, FreeSync or G-Sync Compatible): each
+  present then starts a refresh, so the 60.000 Hz clock gives even frames.
+  This is a compositor and monitor setting, not tested in this pass.
+- A Linux vblank source for the existing display lock: DRM vblank events for
+  the CRTC that shows the window, or Wayland presentation-time feedback. The
+  hard part is mapping the SDL window's display to a DRM connector, which
+  differs between X11, XWayland and Wayland.
+
 ## Measure match entrances
 
 The existing end-of-run fight report excludes the first 30 battle frames.
