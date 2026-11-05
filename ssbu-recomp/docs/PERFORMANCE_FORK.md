@@ -114,3 +114,17 @@ The severe particle-related collapse reported by the player has not been
 fully reproduced or fixed. The measurements and opt-in cache provide a
 starting point; normal-speed high-refresh rendering remains unimplemented.
 Steam Deck hardware, macOS and Windows gameplay were not tested in this pass.
+
+## Source checks and remaining test failures
+
+The five new source-only regression tests, all five existing compiler-scheduler
+configurations, and the NEX self-test (25 tests) passed. The candidate host
+runtime compiled with clang 21 and ran the real-game validation above.
+
+The broader, unchanged WindowSmash-root test suite was also run on NixOS:
+1,156 tests, 9 failures, 1 error, 166 skips. Failures involve its Windows
+compiler probes through Nix's clang-cl wrapper, installer tests that assume
+tools in `/usr/bin` or `/bin`, and one compressed-empty-file fixture in shader
+AOT extraction. Those root implementation files were not changed by this
+fork. This is not a claim that the entire upstream suite is green; the detailed
+logs remain private on the test host.
