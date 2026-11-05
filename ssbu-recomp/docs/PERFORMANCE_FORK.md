@@ -217,6 +217,27 @@ frames, including the entrance, 300 fight frames and a normal shutdown,
 without validation messages. The platform self-test (`tests/plat_selftest.c`)
 passed with the switch off and on.
 
+## Larger stalls in play
+
+The watchdog's stall reports from play on the same machine show bigger gaps
+than the benchmark runs. Their benchmarks shared a warm pipeline cache. In
+one session, four gaps of 250 to 680 ms fell within five seconds around a
+fight start:
+
+- The first-run shader preparation had not run.
+- Draws were held until their pipelines existed.
+- The process used 3 to 9 s of CPU time in each gap, compiling on every core.
+
+In a later session, after the preparation had finished (521 containers), no
+such cluster appeared. Letting the first run's preparation finish keeps these
+compiles out of matches. `shader_wait = skip` in `graphics.ini` leaves a draw
+out near a fight instead of holding the frame, at the cost of missing
+effects in those frames.
+
+One gap of 2.7 s in that later session is not explained. Every thread was
+idle, and the game's main thread waited on a system event. The Linux build
+records no call stacks, so the report cannot say what it waited for.
+
 ## Source checks on NixOS
 
 The five new source-only regression tests, all five existing compiler-scheduler
