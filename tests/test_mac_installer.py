@@ -32,6 +32,9 @@ BASH = '/bin/bash' if os.path.exists('/bin/bash') else shutil.which('bash')
 DARWIN = sys.platform == 'darwin'
 INSTALL = ROOT / 'Install WindowSmash.command'
 SCRIPTS = [ROOT / n for n in im.LAUNCHERS]
+# what Install WindowSmash.command and its stand-ins run besides themselves
+SYSTEM_TOOLS = ('basename', 'bash', 'cat', 'cp', 'cut', 'date', 'dirname', 'gzip', 'id', 'mkdir', 'mv', 'rm',
+                'shasum', 'tar', 'tee', 'uname')
 
 
 def write(path, text, mode=None):
@@ -41,6 +44,20 @@ def write(path, text, mode=None):
     if mode:
         path.chmod(mode)
     return path
+
+
+def system_tools(folder):
+    """A folder of links to the SYSTEM_TOOLS this PATH has, for a test's PATH of stand-ins and /usr/bin:/bin
+    to end with: NixOS's /usr/bin and /bin (envfs) show only what the PATH of whoever looks has, so under
+    such a PATH they are empty, even of the /bin/bash a script starts with. Elsewhere /usr/bin and /bin,
+    before it, have them already. Links to these tools only: no other Python is found through it."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    for tool in SYSTEM_TOOLS:
+        found = shutil.which(tool)
+        if found:
+            (folder / tool).symlink_to(os.path.realpath(found))
+    return folder
 
 
 def shell_function(path, name):
@@ -856,6 +873,7 @@ class BootstrapTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.top = Path(self.temp.name).resolve()   # (as bash's $PWD has it)
         self.bin = self.top / 'bin'
+        self.tools = system_tools(self.top / 'system')
 
     def fake_python(self, path, usable=True, code=0):
         """A Python stand-in: answers the check (usable or not), or says how it was run."""
@@ -878,14 +896,14 @@ class BootstrapTests(unittest.TestCase):
         old = self.fake_python(self.bin / 'old' / 'python3', usable=False)        # (3.9, or an Intel one)
         new = self.fake_python(self.bin / 'new' / 'python3')
         minor = self.fake_python(self.bin / 'minor' / 'python3.12')
-        self.assertEqual(self.finder(root, f'{old.parent}:{new.parent}:{minor.parent}:/usr/bin:/bin'), str(new))
+        self.assertEqual(self.finder(root, f'{old.parent}:{new.parent}:{minor.parent}:/usr/bin:/bin:{self.tools}'), str(new))
         if not any(os.path.exists(p) for p in ('/opt/homebrew/bin/python3', '/usr/local/bin/python3',
                                                '/Library/Frameworks/Python.framework/Versions/Current/bin/python3')):
-            self.assertEqual(self.finder(root, f'{old.parent}:{minor.parent}:/usr/bin:/bin'), str(minor))
+            self.assertEqual(self.finder(root, f'{old.parent}:{minor.parent}:/usr/bin:/bin:{self.tools}'), str(minor))
         if os.path.exists('/usr/bin/python3'):
             self.assertNotEqual(self.finder(root, '/usr/bin:/bin'), '/usr/bin/python3')
         own = self.fake_python(root / 'deps' / 'python' / 'bin' / 'python3')
-        self.assertEqual(self.finder(root, f'{new.parent}:/usr/bin:/bin'), str(own))   # (WindowSmash's own first)
+        self.assertEqual(self.finder(root, f'{new.parent}:/usr/bin:/bin:{self.tools}'), str(own))   # (WindowSmash's own first)
         funcs = shell_function(INSTALL, 'usable_python')
         for p in ('/usr/bin/python3', '/usr/bin/python', ''):
             r = subprocess.run([BASH, '-c', funcs + 'usable_python "$1"', 'x', p], capture_output=True)
@@ -901,7 +919,7 @@ class BootstrapTests(unittest.TestCase):
         py = self.fake_python(self.bin / 'python3', code=7)
         r = subprocess.run([BASH, str(root / INSTALL.name), '--dry-run', '--game', '/My Games'], cwd='/',
                            capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                           env={**os.environ, 'PATH': f'{py.parent}:/usr/bin:/bin:/usr/sbin:/sbin'})
+                           env={**os.environ, 'PATH': f'{py.parent}:/usr/bin:/bin:/usr/sbin:/sbin:{self.tools}'})
         if os.uname().machine != 'arm64':
             self.assertEqual(r.returncode, 1)
             self.assertIn('Apple silicon', r.stdout)
@@ -929,7 +947,7 @@ class BootstrapTests(unittest.TestCase):
         consts = (f'PY_VERSION=3.14.8\nPY_RELEASE=20261013\nPY_FILE=cpython-test.tar.gz\nPY_URL=https://example.invalid/python\n'
                   f'PY_SHA256={sha if sha_matches else "0" * 64}\n')
         return root, subprocess.run([BASH, '-c', consts + funcs + 'get_python'], cwd=root, capture_output=True, text=True,
-                                    env={**os.environ, 'PATH': f'{self.bin}:/usr/bin:/bin'})
+                                    env={**os.environ, 'PATH': f'{self.bin}:/usr/bin:/bin:{self.tools}'})
 
     @unittest.skipUnless(shutil.which('shasum'), 'needs shasum')
     def test_python_download(self):
