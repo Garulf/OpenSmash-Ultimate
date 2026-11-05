@@ -115,16 +115,53 @@ fully reproduced or fixed. The measurements and opt-in cache provide a
 starting point; normal-speed high-refresh rendering remains unimplemented.
 Steam Deck hardware, macOS and Windows gameplay were not tested in this pass.
 
-## Source checks and remaining test failures
+## Source checks on NixOS
 
 The five new source-only regression tests, all five existing compiler-scheduler
 configurations, and the NEX self-test (25 tests) passed. The candidate host
 runtime compiled with clang 21 and ran the real-game validation above.
 
-The broader, unchanged WindowSmash-root test suite was also run on NixOS:
-1,156 tests, 9 failures, 1 error, 166 skips. Failures involve its Windows
-compiler probes through Nix's clang-cl wrapper, installer tests that assume
-tools in `/usr/bin` or `/bin`, and one compressed-empty-file fixture in shader
-AOT extraction. Those root implementation files were not changed by this
-fork. This is not a claim that the entire upstream suite is green; the detailed
-logs remain private on the test host.
+The repository root's WindowSmash suite first ran on NixOS with 9 failures and
+1 error. All were in the tests or their environment, plus one real tool bug:
+
+- `tools/shader_aot.py`, `tools/arc.py` and `tools/nsz.py` on Python 3.10 to
+  3.13 used zstandard's streaming decompressor, which returns whatever it has
+  (often nothing) for a truncated frame. A broken compressed file looked empty.
+  They now raise `ZstdError` unless the frame ended, as Python 3.14's
+  `compression.zstd.decompress` does.
+- `test_isa` and `test_fighter_sdk` ran clang-cl mode through Nix's cc-wrapper,
+  which adds its Linux host's `-isystem`, `-fPIC` and hardening options to every
+  command. The Windows probes now run the compiler named by clang's
+  `InstalledDir`, which is the same clang outside Nix.
+- `test_mac_installer`'s bootstrap tests set `PATH` to stand-ins and
+  `/usr/bin:/bin`. On NixOS those two are envfs views of the looking process's
+  `PATH`, so they held no `mkdir`, `tee` or `/bin/bash`. The tests now end that
+  `PATH` with a folder of links to the tools the scripts use, after
+  `/usr/bin:/bin`, so stand-ins keep priority and no other Python is found.
+- `tools/linux/toolchain.py` takes clang, ld.lld, llvm-ar and llvm-nm from one
+  folder. nixpkgs splits them over three packages, so importing it stopped the
+  test. That is the documented contract, so the test shell provides the folder
+  instead:
+
+```nix
+{ pkgs ? import <nixpkgs> { } }:
+let
+  python = pkgs.python313.withPackages (p: [
+    p.pycryptodomex p.zstandard p.capstone p.unicorn p.pillow
+  ]);
+  llvmBin = pkgs.symlinkJoin {
+    name = "windowsmash-llvm-bin";
+    paths = with pkgs.llvmPackages; [ clang lld llvm ];
+  };
+in pkgs.mkShell { nativeBuildInputs = [ python llvmBin pkgs.pkg-config ]; }
+```
+
+With these, on NixOS 26.11 (clang 21.1.8, Python 3.13.16, envfs):
+`python3 -m unittest discover -s tests` ran 1,156 tests, OK, 162 skipped.
+Most skips need Windows or macOS; the others need numpy, a game dump, an
+opt-in real multicast test, or git history (the test copy was an archive).
+One earlier run also failed
+`test_kernel_waits`: it was started as a zsh background job, and zsh's default
+`BG_NICE` ran it at nice 5, the band those host-priority checks look for. Run
+alone, after the earlier modules in one process, and in a full run started
+with `setsid` at nice 0, it passed.
