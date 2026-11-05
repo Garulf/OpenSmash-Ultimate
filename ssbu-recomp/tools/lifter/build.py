@@ -7,7 +7,9 @@
     python build.py nro <module> [...]          lift + compile + link one DLL per run-time module (see build_nro.py)
 """
 import concurrent.futures
+import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -162,7 +164,12 @@ def cmd_compile(jobs, force):
 # The lifted game code lives in ssbu_game.dll, linked only when obj\ changes; the exe holds just the
 # host runtime, so the edit-link-run loop costs a couple of seconds (see game_shim.c, gamedll.c).
 GAME_DLL = os.environ.get('RECOMP_DLL', 'ssbu_game_eh_o1' + ('.dylib' if TARGET_MACOS else '.so' if TARGET_LINUX else '.dll'))
-HOST_FLAGS = ['-O1', '-g', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN, '-Dfn_table=(*game_fn_table_p)', '-Dfn_table_count=(*game_fn_table_count_p)',
+# The host can be rebuilt independently of the expensive lifted game. Keep the
+# existing default until a target's before/after fight measurements justify it.
+HOST_OPT = os.environ.get('RECOMP_HOST_OPT', '-O1')
+if HOST_OPT not in ('-O0', '-O1', '-O2', '-O3'):
+    raise SystemExit('RECOMP_HOST_OPT must be -O0, -O1, -O2 or -O3 (no fast-math)')
+HOST_FLAGS = [HOST_OPT, '-g', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN, '-Dfn_table=(*game_fn_table_p)', '-Dfn_table_count=(*game_fn_table_count_p)',
               '-Ddyn_syms=(*game_dyn_syms_p)', '-Ddyn_sym_count=(*game_dyn_sym_count_p)',
               '-DGAME_DLL_NAME="%s"' % GAME_DLL,        # gamedll.c (Windows): the game DLL the exe loads by name (or ssbu_game_sky.dll with plugins)
               '-I', os.path.join(os.environ.get('SDL3_ROOT', os.path.join(HERE, '..', 'reference', 'upstream', 'SDL3-3.4.18-VC', 'SDL3-3.4.18')), 'include'),
@@ -177,7 +184,7 @@ IMGUI = os.environ.get('IMGUI_ROOT') or os.path.join(HERE, '..', 'reference', 'u
 HAVE_IMGUI = os.path.isfile(os.path.join(IMGUI, 'imgui.h')) and os.path.isfile(os.path.join(IMGUI, 'imgui.cpp'))
 CXX_SOURCES = ([os.path.join(HERE, 'menu.cpp')] + [os.path.join(IMGUI, n) for n in ('imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp')]
                if HAVE_IMGUI else [])
-CXX_FLAGS = ['-x', 'c++', '-std=c++14', '-O1', '-g', '-w', '-fno-exceptions', '-fno-rtti', '-D_CRT_SECURE_NO_WARNINGS', '-DIMGUI_USER_CONFIG="menu_imconfig.h"', '-I', HERE, '-I', IMGUI]
+CXX_FLAGS = ['-x', 'c++', '-std=c++14', HOST_OPT, '-g', '-w', '-fno-exceptions', '-fno-rtti', '-D_CRT_SECURE_NO_WARNINGS', '-DIMGUI_USER_CONFIG="menu_imconfig.h"', '-I', HERE, '-I', IMGUI]
 LIBS = ['-luser32', '-lgdi32', '-lwinmm', '-lmfplat', '-lmfreadwrite', '-lmfuuid', '-lole32', '-lshlwapi', '-lshell32', '-lsetupapi']
 # Media Foundation delay-loaded: Windows N without the Media Feature Pack has no MFPlat.dll, and the exe must still start
 # there (the movies then play with FFmpeg, mf_ffmpeg.c); nnmovie_mf.c's movie_mf_present() is asked before any call.
@@ -338,6 +345,17 @@ def compile_host(job):
     return src, r.returncode, (r.stdout + r.stderr)[-3000:]
 
 
+def host_build_signature():
+    compiler = shutil.which(CLANG) or CLANG
+    try:
+        compiler_mtime = os.stat(compiler).st_mtime_ns
+    except OSError:
+        compiler_mtime = None
+    return dict(compiler=compiler, compiler_mtime=compiler_mtime,
+                cflags=HOST_FLAGS, cxxflags=CXX_FLAGS, sources=HOST_SOURCES,
+                cxxsources=CXX_SOURCES, rollback=os.environ.get('RECOMP_R1') == '1')
+
+
 def cmd_link(host_only=False):
     if not host_only and build_game_dll():
         return 1
@@ -345,6 +363,19 @@ def cmd_link(host_only=False):
     out = os.path.join(HERE, exe)
     objdir = os.path.join(HERE, 'obj_host', os.path.splitext(exe)[0])
     os.makedirs(objdir, exist_ok=True)
+    stamp = os.path.join(objdir, 'build-flags.json')
+    signature = host_build_signature()
+    try:
+        with open(stamp) as f:
+            flags_changed = json.load(f) != signature
+    except (OSError, ValueError):
+        flags_changed = True
+    if flags_changed:
+        # Invalidate BEFORE compiling: a failed build must not leave a stamp
+        # that lets a later build mix objects made with different flags.
+        if os.path.exists(stamp):
+            os.unlink(stamp)
+        print('host compiler or flags changed: rebuilding all host objects (%s)' % HOST_OPT)
     t0 = time.time()
     newest_dep = max([os.path.getmtime(os.path.join(HERE, h)) for h in os.listdir(HERE) if h.endswith(('.h', '.inc'))] + [os.path.getmtime(os.path.join(HERE, 'build.py'))])
     objs, jobs = [], []
@@ -356,7 +387,7 @@ def cmd_link(host_only=False):
     for n in HOST_SOURCES + ['gamedll.c'] + ([] if HAVE_IMGUI else ['menu_stub.c']):
         src, obj = os.path.join(HERE, 'r1src' if r1 and n == 'nncxxrt.c' else '', n), os.path.join(objdir, n[:-2] + '.obj')
         objs.append(obj)
-        if n == 'gamedll.c' or not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep,     # gamedll.c: always (GAME_DLL_NAME is a flag, not a dependency)
+        if flags_changed or n == 'gamedll.c' or not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep,     # gamedll.c: always (GAME_DLL_NAME is a flag, not a dependency)
                                                                        os.path.getmtime(os.path.join(HERE, 'plat_mf.c')) if n == 'mf_ffmpeg.c' else 0,   # mf_ffmpeg.c includes plat_mf.c
                                                                        max(os.path.getmtime(os.path.join(HERE, 'skyline.c')), os.path.getmtime(os.path.join(HERE, 'sky_compat.c'))) if n == 'nnro.c' else 0):   # nnro.c includes skyline.c, which includes sky_compat.c
             jobs.append((src, obj))
@@ -364,7 +395,7 @@ def cmd_link(host_only=False):
         obj = os.path.join(objdir, os.path.splitext(os.path.basename(src))[0] + '_cxx.obj')
         objs.append(obj)
         dep = newest_dep if src.endswith('menu.cpp') else os.path.getmtime(os.path.join(HERE, 'menu_imconfig.h'))
-        if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), dep):
+        if flags_changed or not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), dep):
             jobs.append((src, obj))
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(16) as pool:
@@ -374,6 +405,9 @@ def cmd_link(host_only=False):
                 print('FAILED %s\n%s' % (os.path.basename(src), err))
     if failed:
         return 1
+    with open(stamp + '.tmp', 'w') as f:
+        json.dump(signature, f, sort_keys=True)
+    os.replace(stamp + '.tmp', stamp)
     if TARGET_MACOS:          # host alone (build.py host): the game library's names are left to be found at load
         game = ['-Wl,-undefined,dynamic_lookup'] if host_only else [os.path.join(HERE, GAME_DLL)]
         r = subprocess.run([CLANG] + MACOS_MIN + objs + game + ['-Wl,-rpath,@executable_path'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
