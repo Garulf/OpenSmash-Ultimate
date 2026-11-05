@@ -92,8 +92,10 @@ fighters on Final Destination, copied saves, scripted inputs, and warm caches:
 
 - The vertex-input cache avoided 981,471 of 1,342,376 state commands in one
   uncapped test. Fight-state logs were identical between that comparison's
-  baseline and cache runs (8,084 records). Captured images were close but not
-  byte-identical; this is not a claim of pixel-exact equivalence.
+  baseline and cache runs (8,084 records). One aligned frame capture matched
+  an unchanged repeat baseline byte-for-byte. The first baseline capture had
+  small pixel differences also present between the two unchanged baselines;
+  this single capture does not establish equivalence for every frame.
 - Uncapped fight throughput was 215.2 FPS without the cache and 214.4 with it.
   Those individual runs do not demonstrate an FPS improvement. Uncapped here
   means fast-forward, not normal-speed play at 214 FPS.
